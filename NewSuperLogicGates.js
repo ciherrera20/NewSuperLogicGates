@@ -1,6 +1,6 @@
 "use strict";
 
-var blog = true;
+var blog = false;
 console.blog = function(...args) {
     if (blog) {
         console.log(...args);
@@ -108,10 +108,16 @@ const zeroes = function(num) {
 			if (!callbacks[eventName]) throw new Error("The event \"" + eventName + "\" has not been defined");
 			if (!callback) throw new Error("A callback function must be provided");
 			let callbackIndex = callbacks[eventName].indexOf(callback);
-			if (callbackIndex === -1) throw new Error("The given callback is not registered with the event \"" + eventName + "\"");
+			//if (callbackIndex === -1) throw new Error("The given callback is not registered with the event \"" + eventName + "\"");
 			
 			// Remove callback
-			callbacks[eventName].splice(callbackIndex, 1);
+			if (callbackIndex !== -1) {
+				callbacks[eventName].splice(callbackIndex, 1);
+			}
+		}
+		
+		EventDispatcher.getEventListeners = function(eventName) {
+			return callbacks[eventName];
 		}
 		
 		// Freeze and return object
@@ -195,7 +201,7 @@ const zeroes = function(num) {
 		if (inputIndex >= inputTo.numInputs) throw new Error("The input index must not be greater than or equal to the number of inputs the given gate has");
 		const inputSize = inputTo.getInputSize(inputIndex);
 		const outputSize = outputFrom.getOutputSize(outputIndex);
-		if (inputSize !== outputSize) throw new Error("Input size must match output size");
+		if (inputSize !== outputSize && inputSize !== Infinity && outputSize !== Infinity) throw new Error("Input size must match output size");
 		
 		// Create object
 		const connection = Object.create(ConnectionProto);
@@ -281,6 +287,36 @@ const traceOutputs = function(gate, callback, depth, history) {
 		});
 	}
 	
+	/**
+	 * Passes an argumentProvider function to the prototype of the object
+	 * Assumes that the prototype of the object is an instance of Gate
+	 *
+	 * @param argumentProvider			ArgumentProvider function which provides the arguments necessary to create a copy of an gate from its constructor
+	 * @param argumentObjProvider		ArgumentObjProvider function provides the objects representations of the arguments necessary to create a clone of a gate from its constructor
+	 */
+	GateProto.setArgumentProvider = function(argumentProvider, argumentObjProvider) {
+		if (!argumentObjProvider) {
+			argumentObjProvider = argumentProvider;
+		}
+		
+		Object.defineProperty(this, "getCopy", {
+			enumerable: true,
+			configurable: false,
+			writable: false,
+			value() {
+				return Object.getPrototypeOf(this).getCopy(argumentProvider);
+			}
+		});
+		Object.defineProperty(this, "toObj", {
+			enumerable: true,
+			configurable: false,
+			writable: false,
+			value() {
+				return Object.getPrototypeOf(this).toObj(argumentObjProvider);
+			}
+		});
+	}
+	
 	let instances = 0;
 	
 	/**
@@ -294,7 +330,7 @@ const traceOutputs = function(gate, callback, depth, history) {
 	 *
 	 * @return				A gate object
 	 */
-	var Gate = function(inputSizes, outputSizes, constructor) {
+	var Gate = function(inputSizes, outputSizes, constructor, state) {
 		// Input validation
 		inputSizes.forEach(function(inputSize){
 			if (inputSize <= 0) throw new Error("An input's size cannot be less than or equal to 0");
@@ -313,20 +349,28 @@ const traceOutputs = function(gate, callback, depth, history) {
 		const inputsFrom = []; // Array of Connection objects representing where the gate's inputs come from
 		const outputsTo = []; // Array of Arrays of Connection objects representing where the gate's outputs come from
 		const outputMap = new Map();
-		const inputs = []; // Array of input data
-		let outputs = []; // Array of output data
+		const inputs = state ? state.inputs : []; // Array of input data
+		let outputs = state ? state.outputs : []; // Array of output data
 		let previousOutputs = []; // Array of previously calculated output data
+		let structureMap;
+		let updateRequired = true;
 		
 		// Load initial data into input and output arrays
-		inputSizes.forEach(function(inputSize, i) {
-			inputs[i] = zeroes(inputSize);
-		});
-		outputSizes.forEach(function(outputSize, i) {
-			//outputs[i] = zeroes(outputSize);
-			outputs[i] = [];
-			//previousOutputs[i] = zeroes(outputSize);
-			previousOutputs[i] = [];
-		});
+		if (!state) {
+			inputSizes.forEach(function(inputSize, i) {
+				if (inputSize === Infinity) {
+					inputs[i] = [];
+				} else {
+					inputs[i] = zeroes(inputSize);
+				}
+			});
+			outputSizes.forEach(function(outputSize, i) {
+				//outputs[i] = zeroes(outputSize);
+				outputs[i] = [];
+				//previousOutputs[i] = zeroes(outputSize);
+				previousOutputs[i] = [];
+			});
+		}
 		
 		// Public properties
 		gate.uid = instances++;
@@ -338,6 +382,49 @@ const traceOutputs = function(gate, callback, depth, history) {
 		});
 		
 		// Public methods
+		/**
+		 * Notifies the gate that an update will be required
+		 * The update isn't actually performed until one if its methods that requires the structure to be up to date is called
+		 */
+		gate.flagUpdate = function() {
+			updateRequired = true;
+		}
+		
+		/**
+		 * Updates the structure's layer map and gate array
+		 * Also adds event listeners to all gates contained within the structure to flag it for an update if their inputs change
+		 */
+		gate.update = function(required) {
+			// If no required flag was provided or the flag is true, perform the update
+			if (required || required === undefined) {
+				const that = this;
+				
+				// Store the previous layer map and gate array
+				const previousLayerMap = structureMap ? structureMap.layerMap : new Map();
+				const previousGateArray = structureMap ? structureMap.gateArray : [];
+				
+				// Update the structure map and set the updateRequired flag to false
+				structureMap = Gate.generateStructureMap([this]);
+				updateRequired = false;
+				
+				// Add flagUpdate as an event listener to all new gates added to the structure
+				structureMap.gateArray.forEach(function(gate) {
+					if (!previousLayerMap.has(gate)) {
+						gate.addEventListener("inputset", that.flagUpdate);
+						gate.addEventListener("inputremoved", that.flagUpdate);
+					}
+				});
+				
+				// Remove flagUpdate as an event listener to all gates removed from the structure
+				previousGateArray.forEach(function(gate) {
+					if (!structureMap.layerMap.has(gate)) {
+						gate.removeEventListener("inputset", that.flagUpdate);
+						gate.removeEventListener("inputremoved", that.flagUpdate);
+					}
+				});
+			}
+		}
+		
 		/**
 		 * Gets the size of an input
 		 * 
@@ -368,6 +455,11 @@ const traceOutputs = function(gate, callback, depth, history) {
 		 * @param inputIndex	The index of the input
 		 */
 		gate.setInput = function(outputFrom, outputIndex, inputIndex) {
+			// If the input has already been set, remove it first
+			if (inputsFrom[inputIndex]) {
+				this.removeInput(inputIndex);
+			}
+			
 			// Create connection object and set it as an input
 			const connection = Connection(outputFrom, outputIndex, this, inputIndex);
 			inputsFrom[inputIndex] = connection;
@@ -450,7 +542,7 @@ const traceOutputs = function(gate, callback, depth, history) {
 			
 			// Make sure the outputMap has the gate the output is connecting to
 			const outputMapEntry = outputMap.get(connection.inputTo);
-			if (!outputEntry) return false;
+			if (!outputMapEntry) return false;
 			
 			// Make sure the outputMap has the connection
 			const connectionMapIndex = outputMapEntry.indexOf(connection);
@@ -570,108 +662,47 @@ const traceOutputs = function(gate, callback, depth, history) {
 			return result;
 		}
 		
+		gate.propagate = function() {
+			this.update(updateRequired);
+			Gate.propagate([this], structureMap);
+		}
+		
+		gate.getCopy = function(argumentProvider) {
+			return constructor(...argumentProvider());
+		}
+		
+		gate.toObj = function(argumentProvider) {
+			const obj = Object.create(null);
+			obj.name = GateRegistry.lookupConstructor(constructor);
+			obj.arguments = argumentProvider();
+			obj.uid = this.uid;
+			obj.inputs = inputs;
+			obj.outputs = outputs;
+			obj.inputsFrom = [];
+			inputsFrom.forEach(function(connection, i) {
+				const inputFrom = Object.create(null);
+				inputFrom.outputFrom = connection.outputFrom.uid;
+				inputFrom.outputIndex = connection.outputIndex;
+				inputFrom.inputIndex = i;
+				obj.inputsFrom.push(inputFrom);
+			});
+			
+			return Object.freeze(obj);
+		}
+		
 		// Freeze and return object
 		return Object.freeze(gate);
 	}
 	
-	// Bind prototype to constructor
-	Gate.prototype = GateProto;
-	
-	// Bind constructor to prototype
-	GateProto.constructor = Gate;
-	
-	// Freeze prototype
-	Object.freeze(GateProto);
-}
-
-
-// Source scope
-{
 	/**
-	 * Creates a Source object
-	 * A gate that serves as a source of data
-	 * Its data can be set externally
+	 * Combines an array of connection maps, mutating the first one and discarding the rest
+	 * If two maps contain the same gate but different connections, the final combined map will contain that gate and the union of the two sets of connections
+	 * There can be no duplicate connections because a gate can only have a single connection per input
 	 *
-	 * @param	The size of the source
-	 */
-	var Source = function(size) {
-		// Create object
-		const source = Object.create(Gate([], [size], Source));
-		
-		// Internal object state
-		let data = zeroes(size); // The source's data
-		
-		// Set the calculator function, which outputs the source's data
-		source.setCalculator(function() {
-			return [data];
-		});
-		
-		// Public properties
-		source.size = size;
-		
-		// Public methods
-		source.getCopy = function() {
-			return Source(size);
-		}
-		
-		/**
-		 * Sets the source's data and calls its calculate function
-		 */
-		source.setData = function(newData) {
-			data = newData;
-		}
-		
-		// Freeze and return object
-		return Object.freeze(source);
-	}
-}
-
-// Sink scope
-{
-	/**
-	 * Creates a Sink object
-	 * A gate that serves as a sink for data
-	 * Its data can accessed externally
+	 * @param maps		An array of maps to combine into one
 	 *
-	 * @param	The size of the sink
+	 * @return			The first map in the array, with all the other maps combined into it
 	 */
-	var Sink = function(size) {
-		// Create object
-		const sink = Object.create(Gate([size], [], Sink));
-		
-		// Internal object state
-		let data = zeroes(size);
-		
-		// Set the calculator function, which sets the sink's data
-		sink.setCalculator(function(newData) {
-			data = newData.inputs[0];
-			return [];
-		});
-		
-		// Public properties
-		sink.size = size;
-		
-		// Public methods
-		sink.getCopy = function() {
-			return Sink(size);
-		}
-		
-		/**
-		 * Gets the sink's
-		 */
-		sink.getData = function() {
-			return data;
-		}
-		
-		return Object.freeze(sink);
-	}
-}
-
-// Structure scope
-{
-	// Prototype object for Structure instances
-	const StructureProto = Object.create(null);
-	
 	const combineMaps = function(maps) {
 		const combinedMap = maps[0];
 		
@@ -694,6 +725,340 @@ const traceOutputs = function(gate, callback, depth, history) {
 		
 		return combinedMap;
 	}
+	
+	/**
+	 * Updates a WeakMap which contains every gate the structure holds as a key and the layer it is on as its value
+	 * The layer a gate is on is equal to how many connections away from a source it is on its longest path. Loops are ignored
+	 *
+	 * @return	A WeakMap whose keys are the structure's gates and whose values are those gates' layer
+	 */
+	Gate.generateStructureMap = function(sources) {
+		console.bgroup("Generating structure map");
+		
+		// Create object
+		const structureMap = Object.create(null);
+		structureMap.layerMap = new WeakMap();
+		structureMap.gateArray = [];
+		structureMap.indexMap = new WeakMap();
+		
+		// Call traceOutputs on each source gate
+		sources.forEach(function(source) {
+			traceOutputs(source, function(gate, layer) {
+				// If the current gate's layer has not yet been set or is lower than the current layer, set it to the current layer
+				const recordedLayer = structureMap.layerMap.get(gate);
+				if (!recordedLayer) {
+					structureMap.gateArray.push(gate);
+				}
+				if (!recordedLayer || recordedLayer < layer) {
+					structureMap.layerMap.set(gate, layer);
+				}
+			});
+		});
+		
+		/**
+		 * Function to compare gates based on their layer
+		 * Returns the difference between the second given gate's layer and the first given gate's layer
+		 *
+		 * @param firstGate		The first gate
+		 * @param secondGate	The second gate
+		 *
+		 * @return				The difference between their layers
+		 */
+		const compareGateLayer = function(firstGate, secondGate) {
+			return structureMap.layerMap.get(secondGate) - structureMap.layerMap.get(firstGate);
+		}
+		
+		console.blog("Sorting gate array");
+		structureMap.gateArray.sort(compareGateLayer);
+		console.blog("Gate array:", structureMap.gateArray);
+		
+		console.blog("Constructing index map");
+		structureMap.gateArray.forEach(function(gate, i) {
+			structureMap.indexMap.set(gate, i);
+		});
+		console.blog("Index map:", structureMap.indexMap);
+		
+		console.bgroupEnd();
+		return Object.freeze(structureMap);
+	}
+	
+	Gate.propagate = function(sources, structureMap) {
+		let maps = []; // Temporary array to store the resulting connection maps from calculating the source gates
+		let sortedGates = []; // An array of gates sorted by layer, from highest to smallest
+		let visited = new WeakMap(); // A weak map of visited gates
+		
+		console.bgroup("Propagation started");
+		console.bgroup("Calculating sources");
+		
+		// Add the result of calculating the source gates to sortedGates and maps
+		sources.forEach(function(source) {
+			let result = source.calculate();
+			console.blog("Calculate ", source, result);
+			maps.push(result.connectionMap);
+		});
+		
+		// Combine connection maps and add output gates to sortedGates array
+		let connectionMap = combineMaps(maps);
+		for (let gate of connectionMap.keys()) {
+			sortedGates[structureMap.indexMap.get(gate)] = gate;
+		}
+		
+		console.blog("Connection map ", connectionMap);
+		console.blog("Sorted gates ", sortedGates);
+		console.bgroupEnd();
+		console.bgroup("Calculating affected gates");
+		
+		// Evaluate each of the sorted gates, starting at the lowest layer, and add the results of their calculations to sortedGates and connectionMap
+		let length = -1; // Number of elements iterable with forEach in sortedGates
+		while (length !== 0) {
+			length = 0;
+			sortedGates.forEach(function(gate, i) {
+				length++;
+				//let gate = sortedGates.pop(); // Get gate at the lowest layer
+				delete sortedGates[i]
+				console.bgroup("Gate ", gate);
+				
+				console.bgroup("Loading inputs");
+				// Loop through all connections connecting to it
+				connectionMap.get(gate).forEach(function(connection) {
+					// Load the inputs represented by those connections
+					console.blog("Input ", connection.inputIndex, gate);
+					gate.loadInput(connection);
+				});
+				console.bgroupEnd();
+				
+				// If the gate has not yet been visited, call its calculate function and add the results to sortedGates and connectionMap
+				if (!visited.has(gate)) {
+					let result = gate.calculate(); // Store result of the calculation
+					console.blog("Calculate ", gate, result);
+					
+					// Add all affected gates to sortedGates
+					result.forEach(function(outputTo) {
+						sortedGates[structureMap.indexMap.get(outputTo)] = outputTo;
+					});
+					
+					// Combine current connection map and the connection map from the result
+					connectionMap = combineMaps([connectionMap, result.connectionMap]);
+					
+					// Keep track of which gates have been visited to prevent recursion
+					visited.set(gate, true);
+					
+					console.blog("Connection map ", connectionMap);
+					console.blog("Sorted gates ", sortedGates);
+				} else {
+					console.blog("Already visited ", gate);
+				}
+				
+				console.bgroupEnd();
+			});
+			console.blog("Sorted gates length ", length);
+		}
+		console.bgroupEnd();
+		console.bgroupEnd();
+	}
+	
+	/**
+	 * Creates an object representation of an array of gates
+	 *
+	 * @return		An arry of objects representing the gates
+	 */
+	Gate.gatesToObj = function(gateArray) {
+		const obj = [];
+		gateArray.forEach(function(gate) {
+			obj.push(gate.toObj());
+		});
+		
+		return Object.freeze(obj);
+	}
+	
+	/**
+	 * Creates an array of gates given their object representation
+	 *
+	 * @return		The arry of gates
+	 */
+	Gate.gatesFromObj = function(obj) {
+		const gateArray = [];
+		const idMap = Object.create(null);
+		obj.forEach(function(gateObj) {
+			const constructor = GateRegistry.lookupName(gateObj.name);
+			const gate = Gate.fromObj(gateObj);
+			gateArray.push(gate);
+			idMap[gateObj.uid] = gate;
+		});
+		obj.forEach(function(gateObj) {
+			const gate = idMap[gateObj.uid];
+			gateObj.inputsFrom.forEach(function(inputFrom) {
+				gate.setInput(idMap[inputFrom.outputFrom], inputFrom.outputIndex, inputFrom.inputIndex);
+			});
+		});
+		
+		gateArray.idMap = idMap;
+		return gateArray;
+	}
+	
+	/**
+	 * Creates a gate given its object representation
+	 *
+	 * @param		The object representation
+	 *
+	 * @return		The gate
+	 */
+	Gate.fromObj = function(obj) {
+		const constructor = GateRegistry.lookupName(obj.name);
+		
+		if (constructor.fromObj) {
+			return constructor.fromObj(obj);
+		} else {		
+			const state = Object.create(null);
+			state.inputs = obj.inputs;
+			state.outputs = obj.outputs;
+			
+			return constructor(...obj.arguments, state);
+		}
+	}
+	
+	// Bind prototype to constructor
+	Gate.prototype = GateProto;
+	
+	// Bind constructor to prototype
+	GateProto.constructor = Gate;
+	
+	// Freeze prototype
+	Object.freeze(GateProto);
+}
+
+// GateRegistry scope
+{
+	// Objects to keep track of gate constructors and their names
+	const nameMap = Object.create(null);
+	const constructorMap = new WeakMap();
+	
+	// Interface for maps
+	var GateRegistry = Object.create(null);
+	
+	/**
+	 * Add a constructor and name pair
+	 */
+	GateRegistry.add = function(constructor, name) {
+		nameMap[name] = constructor;
+		constructorMap.set(constructor, name);
+	}
+	
+	/**
+	 * Return the constructor associated with the given name
+	 *
+	 * @return	The constructor
+	 */
+	GateRegistry.lookupName = function(name) {
+		return nameMap[name];
+	}
+	
+	/**
+	 * Return the name associated with the given constructor
+	 *
+	 * @return	The name
+	 */
+	GateRegistry.lookupConstructor = function(constructor) {
+		return constructorMap.get(constructor);
+	}
+}
+
+// Source scope
+{
+	/**
+	 * Creates a Source object
+	 * A gate that serves as a source of data
+	 * Its data can be set externally
+	 *
+	 * @param	The size of the source
+	 */
+	var Source = function(size, state) {
+		size = size || Infinity;
+		
+		// Create object
+		const source = Object.create(Gate([], [size], Source, state));
+		
+		// Internal object state
+		let data = size === Infinity ? [] : zeroes(size); // The source's data
+		
+		// Set the calculator function, which outputs the source's data
+		source.setCalculator(function() {
+			return [data];
+		});
+		
+		// Set the argumentProvider function, which returns the source's arguments
+		source.setArgumentProvider(function() {
+			return [size];
+		});
+		
+		// Public properties
+		source.size = size;
+		
+		// Public methods		
+		/**
+		 * Sets the source's data and calls its calculate function
+		 */
+		source.setData = function(newData) {
+			data = newData;
+		}
+		
+		// Freeze and return object
+		return Object.freeze(source);
+	}
+	
+	GateRegistry.add(Source, "Source");
+}
+
+// Sink scope
+{
+	/**
+	 * Creates a Sink object
+	 * A gate that serves as a sink for data
+	 * Its data can accessed externally
+	 *
+	 * @param	The size of the sink
+	 */
+	var Sink = function(size, state) {
+		size = size || Infinity;
+		
+		// Create object
+		const sink = Object.create(Gate([size], [], Sink, state));
+		
+		// Internal object state
+		let data;
+		
+		// Set the calculator function, which sets the sink's data
+		sink.setCalculator(function(newData) {
+			data = newData.inputs[0];
+			return [];
+		});
+		
+		// Set the argumentProvider function, which returns the sink's arguments
+		sink.setArgumentProvider(function() {
+			return [size];
+		});
+		
+		// Public properties
+		sink.size = size;
+		
+		// Public methods		
+		/**
+		 * Gets the sink's data
+		 */
+		sink.getData = function() {
+			return data;
+		}
+		
+		return Object.freeze(sink);
+	}
+	
+	GateRegistry.add(Sink, "Sink");
+}
+
+// Structure scope
+{
+	// Prototype object for Structure instances
+	const StructureProto = Object.create(null);
 	
 	/**
 	 * Returns the index of an element in the given array equal to the given element using a binary search algorithm
@@ -726,6 +1091,173 @@ const traceOutputs = function(gate, callback, depth, history) {
 		return l;
 	}
 	
+	// Public static methods
+	/**
+	 * Generate an array of input sizes from the sizes of the structure's sources
+	 *
+	 * @return	The array of input sizes
+	 */
+	StructureProto.generateInputSizes = function() {
+		const inputSizes = [];
+		this.sources.forEach(function(source, i) {
+			inputSizes.push(source.size);
+		});
+		return inputSizes;
+	}
+	
+	/**
+	 * Generate an array of output sizes from the sizes of the structure's sinks
+	 *
+	 * @return	The array of output sizes
+	 */
+	StructureProto.generateOutputSizes = function() {
+		const outputSizes = [];
+		this.sinks.forEach(function(sink, i) {
+			outputSizes.push(sink.size);
+		});
+		return outputSizes;
+	}
+	
+	/**
+	 * Updates a WeakMap which contains every gate the structure holds as a key and the layer it is on as its value
+	 * The layer a gate is on is equal to how many connections away from a source it is on its longest path. Loops are ignored
+	 *
+	 * @return	A WeakMap whose keys are the structure's gates and whose values are those gates' layer
+	 */
+	StructureProto.generateStructureMap = function() {
+		return Gate.generateStructureMap(this.sources);
+	}
+	
+	/**
+	 * Configure a gate's input to receive data from a source
+	 *
+	 * @param inputTo		The gate to send the data to
+	 * @param inputIndex	The index of the gate's input to send the data to
+	 * @param sourceIndex	The index of the source that provides the data
+	 */
+	StructureProto.sendInputTo = function(inputTo, inputIndex, sourceIndex) {
+		this.flagUpdate();
+		inputTo.setInput(this.sources[sourceIndex], 0, inputIndex);
+	}
+	
+	/**
+	 * Configure a gate's input to stop receiving data from a source
+	 *
+	 * @param inputTo		The gate to stop sending data to
+	 * @param inputIndex	The index of the gate's input to stop sending data to
+	 */
+	StructureProto.removeInputTo = function(inputTo, inputIndex) {
+		this.flagUpdate();
+		inputTo.removeInput(inputIndex);
+	}
+	
+	/**
+	 * Configure a sink to receive data from a gate's output
+	 *
+	 * @param outputFrom	The gate to receive data from
+	 * @param outputIndex	The index of the gate's output to receive data from
+	 * @param sinkIndex		The index of the sink
+	 */
+	StructureProto.takeOutputFrom = function(outputFrom, outputIndex, sinkIndex) {
+		this.flagUpdate();
+		this.sinks[sinkIndex].setInput(outputFrom, outputIndex, 0);
+	}
+	
+	/**
+	 * Configure a sink to stop receiving data from a gate's output
+	 *
+	 * @param sinkIndex		The index of the sink
+	 */
+	StructureProto.removeOutputFrom = function(sinkIndex) {
+		this.flagUpdate();
+		this.sinks[sinkIndex].removeInput(0);
+	}
+	
+	/**
+	 * Add a source of a given size
+	 *
+	 * @param size			The source's size
+	 */
+	StructureProto.addSource = function(size) {
+		this.flagUpdate();
+		this.sources.push(Source(size));
+	}
+	
+	/**
+	 * Add a sink of a given size
+	 *
+	 * @param size			The sink's size
+	 */
+	StructureProto.addSink = function(size) {
+		this.flagUpdate();
+		this.sinks.push(size);
+	}
+	
+	/**
+	 * Remove a source
+	 *
+	 * @param sourceIndex	The source's index
+	 */
+	StructureProto.removeSource = function(sourceIndex) {
+		this.flagUpdate();
+		this.sources.splice(sourceIndex, 1);
+	}
+	
+	/**
+	 * Remove a sink
+	 *
+	 * @param sinkIndex		The sink's index
+	 */
+	StructureProto.removeSink = function(sinkIndex) {
+		this.flagUpdate();
+		this.sinks.splice(sinkIndex, 1);
+	}
+	
+	/**
+	 * Move a source to a new index
+	 * Removes source, then adds it at the new index
+	 *
+	 * @param sourceIndex	The index of the source to move
+	 * @param newIndex		The index to move it to
+	 */
+	StructureProto.moveSource = function(sourceIndex, newIndex) {
+		const source = this.sources.splice(sourceIndex, 1);
+		this.sources.splice(newIndex, 0, source);
+	}
+	
+	/**
+	 * Move a sink to a new index
+	 * Removes sink, then adds it at the new index
+	 *
+	 * @param sinkIndex		The index of the sink to move
+	 * @param newIndex		The index to move it to
+	 */
+	StructureProto.moveSink = function(sinkIndex, newIndex) {
+		const sink = this.sinks.splice(sinkIndex, 1);
+		this.sinks.splice(newIndex, 0, sink);
+	}
+	
+	/**
+	 * Set the data for a particular source gate
+	 *
+	 * @param sourceIndex	The source gate
+	 * @param data			The data
+	 */
+	StructureProto.setData = function(sourceIndex, data) {
+		this.sources[sourceIndex].setData(data);
+	}
+	
+	/**
+	 * Get the data from a particular sink gate
+	 *
+	 * @param sinkIndex		The sink gate
+	 *
+	 * @return				The data
+	 */
+	StructureProto.getData = function(sinkIndex) {
+		return this.sinks[sinkIndex].getData();
+	}
+	
 	/**
 	 * Creates a Structure object
 	 * Holds the information about the structure of a compound gate
@@ -738,249 +1270,85 @@ const traceOutputs = function(gate, callback, depth, history) {
 		const structure = Object.create(StructureProto);
 		
 		// Internal object state
-		let layerMap;
-		let gateArray;
-		let indexMap;
-		let updateRequired = false;
+		let structureMap;
+		let updateRequired = true;
 		
-		// Private functions
-		/**
-		 * Function to compare gates based on their layer
-		 * Returns the difference between the second given gate's layer and the first given gate's layer
-		 *
-		 * @param firstGate		The first gate
-		 * @param secondGate	The second gate
-		 *
-		 * @return				The difference between their layers
-		 */
-		const compareGateLayer = function(firstGate, secondGate) {
-			return layerMap.get(secondGate) - layerMap.get(firstGate);
-		}
+		// Public properties
+		structure.sources = sources;
+		structure.sinks = sinks;
 		
+		// Public methods		
 		/**
-		 * Updates a WeakMap which contains every gate the structure holds as a key and the layer it is on as its value
-		 * The layer a gate is on is equal to how many connections away from a source it is on its longest path. Loops are ignored
-		 *
-		 * @return	A WeakMap whose keys are the structure's gates and whose values are those gates' layer
+		 * Notifies the structure that an update will be required
+		 * The update isn't actually performed until one if its methods that requires the structure to be up to date is called
 		 */
-		 const updateLayerMap = function() {
-			layerMap = new WeakMap();
-			gateArray = [];
-			indexMap = new WeakMap();
-			
-			// Call traceOutputs on each source gate
-			sources.forEach(function(source) {
-				traceOutputs(source, function(gate, layer) {
-					// If the current gate's layer has not yet been set or is lower than the current layer, set it to the current layer
-					const recordedLayer = layerMap.get(gate);
-					if (!recordedLayer) {
-						gateArray.push(gate);
-					}
-					if (!recordedLayer || recordedLayer < layer) {
-						layerMap.set(gate, layer);
-					}
-				});
-			});
-			
-			gateArray.sort(compareGateLayer);
-			gateArray.forEach(function(gate, i) {
-				indexMap.set(gate, i);
-			});
-		}
-		
-		// Public methods
-		/**
-		 * Generate an array of input sizes from the sizes of the structure's sources
-		 *
-		 * @return	The array of input sizes
-		 */
-		structure.generateInputSizes = function() {
-			const inputSizes = [];
-			sources.forEach(function(source, i) {
-				inputSizes.push(source.size);
-			});
-			return inputSizes;
-		}
-		
-		/**
-		 * Generate an array of output sizes from the sizes of the structure's sinks
-		 *
-		 * @return	The array of output sizes
-		 */
-		structure.generateOutputSizes = function() {
-			const outputSizes = [];
-			sinks.forEach(function(sink, i) {
-				outputSizes.push(sink.size);
-			});
-			return outputSizes;
+		structure.flagUpdate = function() {
+			updateRequired = true;
 		}
 		
 		/**
 		 * Updates the structure's layer map and gate array
+		 * Also adds event listeners to all gates contained within the structure to flag it for an update if their inputs change
 		 */
 		structure.update = function(required) {
+			// If no required flag was provided or the flag is true, perform the update
 			if (required || required === undefined) {
-				updateLayerMap();
+				const that = this;
+				
+				// Store the previous layer map and gate array
+				const previousLayerMap = structureMap ? structureMap.layerMap : new Map();
+				const previousGateArray = structureMap ? structureMap.gateArray : [];
+				
+				// Update the structure map and set the updateRequired flag to false
+				structureMap = this.generateStructureMap();
+				updateRequired = false;
+				
+				// Add flagUpdate as an event listener to all new gates added to the structure
+				structureMap.gateArray.forEach(function(gate) {
+					if (!previousLayerMap.has(gate)) {
+						gate.addEventListener("inputset", that.flagUpdate);
+						gate.addEventListener("inputremoved", that.flagUpdate);
+					}
+				});
+				
+				// Remove flagUpdate as an event listener to all gates removed from the structure
+				previousGateArray.forEach(function(gate) {
+					if (!structureMap.layerMap.has(gate)) {
+						gate.removeEventListener("inputset", that.flagUpdate);
+						gate.removeEventListener("inputremoved", that.flagUpdate);
+					}
+				});
 			}
-		}
-		structure.update();
-		
-		/**
-		 * Configure a gate's input to receive data from a source
-		 *
-		 * @param inputTo		The gate to send the data to
-		 * @param inputIndex	The index of the gate's input to send the data to
-		 * @param sourceIndex	The index of the source that provides the data
-		 */
-		structure.sendInputTo = function(inputTo, inputIndex, sourceIndex) {
-			updateRequired = true;
-			inputTo.setInput(sources[sourceIndex], 0, inputIndex);
-		}
-		
-		/**
-		 * Configure a gate's input to stop receiving data from a source
-		 *
-		 * @param inputTo		The gate to stop sending data to
-		 * @param inputIndex	The index of the gate's input to stop sending data to
-		 */
-		structure.removeInputTo = function(inputTo, inputIndex) {
-			updateRequired = true;
-			inputTo.removeInput(inputIndex);
-		}
-		
-		/**
-		 * Configure a sink to receive data from a gate's output
-		 *
-		 * @param outputFrom	The gate to receive data from
-		 * @param outputIndex	The index of the gate's output to receive data from
-		 * @param sinkIndex		The index of the sink
-		 */
-		structure.takeOutputFrom = function(outputFrom, outputIndex, sinkIndex) {
-			updateRequired = true;
-			sinks[sinkIndex].setInput(outputFrom, outputIndex, 0);
-		}
-		
-		/**
-		 * Configure a sink to stop receiving data from a gate's output
-		 *
-		 * @param sinkIndex		The index of the sink
-		 */
-		structure.removeOutputFrom = function(sinkIndex) {
-			updateRequired = true;
-			sinks[sinkIndex].removeInput(0);
-		}
-		
-		/**
-		 * Set the data for a particular source gate
-		 *
-		 * @param sourceIndex	The source gate
-		 * @param data			The data
-		 */
-		structure.setData = function(sourceIndex, data) {
-			sources[sourceIndex].setData(data);
-		}
-		
-		/**
-		 * Get the data from a particular sink gate
-		 *
-		 * @param sinkIndex		The sink gate
-		 *
-		 * @return				The data
-		 */
-		structure.getData = function(sinkIndex) {
-			return sinks[sinkIndex].getData();
 		}
 		
 		structure.calculate = function() {
 			// If necessary, update the layer map, gate array, and index map
 			this.update(updateRequired);
 			
-			let maps = []; // Temporary array to store the resulting connection maps from calculating the source gates
-			let sortedGates = []; // An array of gates sorted by layer, from highest to smallest
-			let visited = new WeakMap(); // A weak map of visited gates
-			
-			console.bgroup("Calculating sources");
-			
-			// Add the result of calculating the source gates to sortedGates and maps
-			sources.forEach(function(source) {
-				let result = source.calculate();
-				console.blog("Calculate ", source, result);
-				maps.push(result.connectionMap);
-			});
-			
-			// Combine connection maps and sort gates by layer
-			let connectionMap = combineMaps(maps);
-			//sortedGates = [...connectionMap.keys()].sort(compareGateLayer);
-			
-			for (let gate of connectionMap.keys()) {
-				sortedGates[indexMap.get(gate)] = gate;
-			}
-			
-			console.blog("Connection map ", connectionMap);
-			console.blog("Sorted gates ", sortedGates);
-			console.bgroupEnd();
-			console.bgroup("Calculating affected gates");
-			
-			// Evaluate each of the sorted gates, starting at the lowest layer, and add the results of their calculations to sortedGates and connectionMap
-			let length = -1; // Number of elements iterable with forEach in sortedGates
-			while (length !== 0) {
-				length = 0;
-				sortedGates.forEach(function(gate, i) {
-					length++;
-					//let gate = sortedGates.pop(); // Get gate at the lowest layer
-					delete sortedGates[i]
-					console.bgroup("Gate ", gate);
-					
-					console.bgroup("Loading inputs");
-					// Loop through all connections connecting to it
-					connectionMap.get(gate).forEach(function(connection) {
-						// Load the inputs represented by those connections
-						console.blog("Input ", connection.inputIndex, gate);
-						gate.loadInput(connection);
-					});
-					console.bgroupEnd();
-					
-					// If the gate has not yet been visited, call its calculate function and add the results to sortedGates and connectionMap
-					if (!visited.has(gate)) {
-						let result = gate.calculate(); // Store result of the calculation
-						console.blog("Calculate ", gate, result);
-						
-						// Add all affected gates to sortedGates
-						result.forEach(function(outputTo) {
-							sortedGates[indexMap.get(outputTo)] = outputTo;
-						});
-						
-						// Combine current connection map and the connection map from the result
-						connectionMap = combineMaps([connectionMap, result.connectionMap]);
-						
-						// Keep track of which gates have been visited to prevent recursion
-						visited.set(gate, true);
-						
-						console.blog("Connection map ", connectionMap);
-						console.blog("Sorted gates ", sortedGates);
-					} else {
-						console.blog("Already visited ", gate);
-					}
-					
-					console.bgroupEnd();
-				});
-				console.blog("Sorted gates length ", length);
-			}
-			console.bgroupEnd();
+			Gate.propagate(sources, structureMap);
 		}
 		
+		/**
+		 * Creates and returns a deep copy of this structure
+		 *
+		 * @return		The copy
+		 */
 		structure.getCopy = function() {
+			// Update if necessary
 			this.update(updateRequired);
 			const copyMap = new Map();
 			
 			// Create copies of each gate in the structure and store them in a Map
-			gateArray.forEach(function(gate) {
+			structureMap.gateArray.forEach(function(gate) {
 				copyMap.set(gate, gate.getCopy());
 			});
 			
-			// Loop through each gate in the structure and connect the copies in the same way
-			gateArray.forEach(function(gate) {
+			// Loop through each gate in the structure and connect the copies in the same way as their originals
+			structureMap.gateArray.forEach(function(gate) {
+				// Retrieve copy
 				const gateCopy = copyMap.get(gate);
+				
+				// Loop through copies of output gates and add the current gate copy as an input using the connection information
 				gate.getOutputMap().forEach(function(connections, outputTo) {
 					const outputToCopy = copyMap.get(outputTo);
 					connections.forEach(function(connection) {
@@ -989,21 +1357,57 @@ const traceOutputs = function(gate, callback, depth, history) {
 				});
 			});
 			
-			// Construct new sources and sinks arrays
+			// Create new sources array and sinks array
 			const sourcesCopy = [];
 			const sinksCopy = [];
+			
+			// Add the copied sources into the new sources array
 			sources.forEach(function(source) {
 				sourcesCopy.push(copyMap.get(source));
 			});
+			
+			// Add the copied sinks into the new sinks array
 			sinks.forEach(function(sink) {
 				sinksCopy.push(copyMap.get(sink));
 			});
 			
+			// Return the newly constructed structure copy
 			return Structure(sourcesCopy, sinksCopy);
+		}
+		
+		structure.toObj = function() {
+			this.update(updateRequired);
+			
+			const obj = Object.create(null);
+			obj.sources = [];
+			sources.forEach(function(source) {
+				obj.sources.push(source.uid);
+			});
+			obj.sinks = [];
+			sinks.forEach(function(sink) {
+				obj.sinks.push(sink.uid);
+			});
+			obj.gates = Gate.gatesToObj(structureMap.gateArray);
+			
+			return Object.freeze(obj);
 		}
 		
 		// Freeze and return object
 		return Object.freeze(structure);
+	}
+	
+	Structure.fromObj = function(obj) {
+		const gateArray = Gate.gatesFromObj(obj.gates);
+		const sources = [];
+		obj.sources.forEach(function(sourceId) {
+			sources.push(gateArray.idMap[sourceId]);
+		});
+		const sinks = [];
+		obj.sinks.forEach(function(sinkId) {
+			sinks.push(gateArray.idMap[sinkId]);
+		});
+		
+		return Structure(sources, sinks);
 	}
 	
 	// Bind prototype to constructor
@@ -1018,13 +1422,8 @@ const traceOutputs = function(gate, callback, depth, history) {
 
 // CompoundGate scope
 {
-	var CompoundGate = function(structure, constructor) {
-		const compoundGate = Object.create(Gate(structure.generateInputSizes(), structure.generateOutputSizes(), CompoundGate));
-		
-		Object.defineProperty(compoundGate, "constructor", {
-			enumerable: true,
-			value: constructor || CompoundGate
-		});
+	var CompoundGate = function(structure, state) {
+		const compoundGate = Object.create(Gate(structure.generateInputSizes(), structure.generateOutputSizes(), CompoundGate, state));
 		
 		compoundGate.setCalculator(function(data) {
 			// Load this gate's inputs into the structure's sources
@@ -1045,19 +1444,31 @@ const traceOutputs = function(gate, callback, depth, history) {
 			return outputs;
 		});
 		
-		compoundGate.getCopy = function() {
-			return CompoundGate(structure.getCopy(), constructor);
-		}
+		compoundGate.setArgumentProvider(function() {
+			return [structure.getCopy()];
+		}, function() {
+			return [structure.toObj()];
+		});
 		
 		return Object.freeze(compoundGate);
 	}
+	
+	CompoundGate.fromObj = function(obj) {
+		const structure = Structure.fromObj(obj.arguments[0]);
+		const state = Object.create(null);
+		state.inputs = obj.inputs;
+		state.outputs = obj.outputs;
+		
+		return CompoundGate(structure, state);
+	}
+	
+	GateRegistry.add(CompoundGate, "CompoundGate");
 }
 
 // GateFactory scope
 {
-	var GateFactory = function(name, inputSizes, outputSizes) {
-		const obj = Object.create(null);
-
+	var GateFactory = function(inputSizes, outputSizes) {
+		// Create structure based on initially provided input and output sizes
 		let structure;
 		{
 			const sources = [];
@@ -1077,11 +1488,57 @@ const traceOutputs = function(gate, callback, depth, history) {
 			structure = Structure(sources, sinks);
 		}
 		
-		obj[name] = function() {
-			
+		// Factory function creates and returns a CompoundGate object using a copy of the structure
+		const gateFactory = function() {
+			return CompoundGate(structure.getCopy(), gateFactory);
+		}
+
+		gateFactory.update = function(required) {
+			structure.update(required);
+		}
+
+		gateFactory.sendInputTo = function(inputTo, inputIndex, sourceIndex) {
+			structure.sendInputTo(inputTo, inputIndex, sourceIndex);
 		}
 		
-		return obj[name]
+		gateFactory.removeInputTo = function(inputTo, inputIndex) {
+			structure.removeInputTo(inputTo, inputIndex);
+		}
+		
+		gateFactory.takeOutputFrom = function(outputFrom, outputIndex, sinkIndex) {
+			structure.takeOutputFrom(outputFrom, outputIndex, sinkIndex);
+		}
+		
+		gateFactory.removeOutputFrom = function(sinkIndex) {
+			structure.removeOutputFrom(sinkIndex);
+		}
+		
+		gateFactory.addSource = function(size) {
+			structure.addSource(size);
+		}
+		
+		gateFactory.addSink = function(size) {
+			structure.addSink(size);
+		}
+		
+		gateFactory.removeSource = function(sourceIndex) {
+			structure.removeSource(sourceIndex);
+		}
+		
+		gateFactory.removeSink = function(sinkIndex) {
+			structure.removeSink(sinkIndex);
+		}
+		
+		gateFactory.moveSource = function(sourceIndex, newIndex) {
+			structure.moveSource(sourceIndex, newIndex);
+		}
+		
+		gateFactory.moveSink = function(sinkIndex, newIndex) {
+			structure.moveSink(sinkIndex, newIndex);
+		}
+		
+		// Return factory function
+		return gateFactory;
 	}
 }
 
@@ -1091,9 +1548,10 @@ const traceOutputs = function(gate, callback, depth, history) {
 	 * Creates a Wire object
 	 * Outputs its input
 	 */
-	var Wire = function(throughput, inputSizes, outputSizes) {
+	var Wire = function(throughput, inputSizes, outputSizes, state) {
 		// Input validation
 		if (throughput <= 0) throw new Error("The throughput cannot be less than or equal to zero");
+		if (throughput === Infinity) throw new Error("The throughput cannot be Infinity");
 		if (!inputSizes) inputSizes = [throughput];
 		if (!outputSizes) outputSizes = [throughput];
 		
@@ -1110,7 +1568,7 @@ const traceOutputs = function(gate, callback, depth, history) {
 		if (outputSum !== throughput) throw new Error("The sum of the output sizes must be equal to the wire's throughput");
 		
 		// Create object
-		const wire = Object.create(Gate(inputSizes.slice(), outputSizes.slice(), Wire));
+		const wire = Object.create(Gate(inputSizes.slice(), outputSizes.slice(), Wire, state));
 		
 		//Set the calculator function, which outputs its inputs in the correct outputSizes
 		wire.setCalculator(function(data) {
@@ -1120,6 +1578,7 @@ const traceOutputs = function(gate, callback, depth, history) {
 			let outputSizeRunningTotal = data.outputSizes[0];
 			let outputSizeIndex = 0;
 			
+			// Pipe inputs into outputs
 			data.inputs.forEach(function(inputData, j) {
 				inputData.forEach(function(datum, k) {
 					if (outputSizeRunningTotal === i) {
@@ -1138,13 +1597,16 @@ const traceOutputs = function(gate, callback, depth, history) {
 			return outputs;
 		});
 		
-		wire.getCopy = function() {
-			return Wire(throughput, inputSizes, outputSizes);
-		}
+		// Set the argumentProvider function, which returns the wire's arguments
+		wire.setArgumentProvider(function() {
+			return [throughput, inputSizes, outputSizes];
+		});
 		
 		// Freeze and return object
 		return Object.freeze(wire);
 	}
+	
+	GateRegistry.add(Wire, "Wire");
 }
 
 // Toggle scope
@@ -1153,36 +1615,36 @@ const traceOutputs = function(gate, callback, depth, history) {
 	 * Creates a Toggle object
 	 * Outputs a state that can be set publicly
 	 */
-	var Toggle = function() {
+	var Toggle = function(state) {
 		// Create object
-		const toggle = Object.create(Gate([], [1], Toggle));
+		const toggle = Object.create(Gate([], [1], Toggle, state));
 		
 		// Internal object state
-		let state = 0;
+		let data = 0;
 		
 		// Set the calculator function, which outputs the internal state
-		toggle.setCalculator(function(data) {
-			return [[state]];
+		toggle.setCalculator(function() {
+			return [[data]];
+		});
+		
+		// Set the argumentProvider function, which returns the toggle's arguments
+		toggle.setArgumentProvider(function() {
+			return [];
 		});
 		
 		// Public methods
-		toggle.getCopy = function() {
-			return Toggle();
-		}
-		
 		/**
 		 * Set the value of the internal state
 		 */
-		toggle.setState = function(newState) {
-			state = newState;
-			return this.calculate();
+		toggle.setData = function(newData) {
+			data = newData;
 		}
 		
 		/**
 		 * Get the value of the internal state
 		 */
-		toggle.getState = function() {
-			return state;
+		toggle.getData = function() {
+			return data;
 		}
 		
 		/**
@@ -1190,13 +1652,14 @@ const traceOutputs = function(gate, callback, depth, history) {
 		 * If the state is equal to 0, set it to 1. Otherwise, set it to 0
 		 */
 		toggle.toggle = function() {
-			state = state === 0 ? 1 : 0;
-			return this.calculate();
+			data = data === 0 ? 1 : 0;
 		}
 		
 		// Freeze and return object
 		return Object.freeze(toggle);
 	}
+	
+	GateRegistry.add(Toggle, "Toggle");
 }
 
 // Nand scope
@@ -1204,69 +1667,116 @@ const traceOutputs = function(gate, callback, depth, history) {
 	/**
 	 * Creates a Nand object
 	 */
-	var Nand = function() {
+	var Nand = function(state) {
 		// Create object
-		const nand = Object.create(Gate([1, 1], [1], Nand));
+		const nand = Object.create(Gate([1, 1], [1], Nand, state));
 		
 		nand.setCalculator(function(data) {
 			return [[Number(!(data.inputs[0][0] && data.inputs[1][0]))]];
 		});
 		
-		nand.getCopy = function() {
-			return Nand();
-		}
+		// Set the argumentProvider function, which returns the nand's arguments
+		nand.setArgumentProvider(function() {
+			return [];
+		});
 		
 		// Freeze and return object
 		return Object.freeze(nand);
 	}
+	
+	GateRegistry.add(Nand, "Nand");
 }
 
+// VariableNand scope
+{
+	/**
+	 * Creates a VariableOr object
+	 * An or gate that accepts a variable number of inputs and returns the orred result
+	 */
+	var VariableNand = function(state) {
+		// Create object
+		const variableNand = Object.create(Gate([Infinity], [1], VariableNand, state));
+		
+		variableNand.setCalculator(function(data) {
+			return [[Number(data.inputs[0].some(function(input) {
+				return input === 0;
+			}))]];
+		});
+		
+		// Set the argumentProvider function, which returns the variableNand's arguments
+		variableNand.setArgumentProvider(function() {
+			return [];
+		});
+		
+		return Object.freeze(variableNand);
+	}
+	
+	GateRegistry.add(VariableNand, "VariableNand");
+}
 
-/*var wire0 = Wire(4, [1, 1, 1, 1], [4]);
-var toggle0 = Toggle();
-var toggle1 = Toggle();
-var toggle2 = Toggle();
-var toggle3 = Toggle();
-wire0.setInput(toggle0, 0, 0);
-wire0.setInput(toggle1, 0, 1);
-wire0.setInput(toggle2, 0, 2);
-wire0.setInput(toggle3, 0, 3);*/
+// VariableInv scope
+{
+	/**
+	 * Creates a VariableInv object
+	 * An inverter gate that accepts a variable number of inputs and returns the same number of outputs, inverted
+	 */
+	var VariableInv = function(state) {
+		const variableInv = Object.create(Gate([Infinity], [Infinity], VariableInv, state));
+		
+		variableInv.setCalculator(function(data) {
+			const outputs = [];
+			
+			data.inputs.forEach(function(inputData) {
+				const outputData = [];
+				inputData.forEach(function(datum) {
+					outputData.push(datum === 0 ? 1 : 0);
+				});
+				outputs.push(outputData);
+			});
+			
+			return outputs;
+		});
+		
+		// Set the argumentProvider function, which returns the variableInv's arguments
+		variableInv.setArgumentProvider(function() {
+			return [];
+		});
+		
+		return Object.freeze(variableInv);
+	}
+	
+	GateRegistry.add(VariableInv, "VariableInv");
+}
 
-/*var nand0 = Nand();
-var nand1 = Nand();
-var toggle0 = Toggle();
-nand0.setInput(toggle0, 0, 0);
-nand0.setInput(toggle0, 0, 1);
-nand1.setInput(toggle0, 0, 0);
-nand1.setInput(toggle0, 0, 1);*/
+// Inv scope
+// {
+	const nand0 = Nand();
+	var Inv = GateFactory([1], [1]);
+	Inv.sendInputTo(nand0, 0, 0);
+	Inv.sendInputTo(nand0, 1, 0);
+	Inv.takeOutputFrom(nand0, 0, 0);
+// }
 
-/*var source0 = Source(5);
-var sink0 = Sink(5);
-sink0.setInput(source0, 0, 0);*/
+// VariableAnd scope
+// {
+	const variableNand0 = VariableNand();
+	const inv0 = Inv();
+	var VariableAnd = GateFactory([Infinity], [1]);
+	inv0.setInput(variableNand0, 0, 0);
+	VariableAnd.sendInputTo(variableNand0, 0, 0);
+	VariableAnd.takeOutputFrom(inv0, 0, 0);
+// }
 
-/*var source0 = Source(1);
-var source1 = Source(1);
-var nand0 = Nand();
-var sink0 = Sink(1);
+// VariableOr scope
+// {
+	const variableInv0 = VariableInv();
+	const variableNand1 = VariableNand();
+	var VariableOr = GateFactory([Infinity], [1]);
+	variableNand1.setInput(variableInv0, 0, 0);
+	VariableOr.sendInputTo(variableInv0, 0, 0);
+	VariableOr.takeOutputFrom(variableNand1, 0, 0);
+// }
 
-sink0.setInput(nand0, 0, 0);
-nand0.setInput(source0, 0, 0);
-nand0.setInput(source1, 0, 1);
-
-var structure0 = Structure([source0, source1], [sink0]);*/
-
-var source0 = Source(1);
-var nand0 = Nand();
-var sink0 = Sink(1);
-
-sink0.setInput(nand0, 0, 0);
-nand0.setInput(source0, 0, 0);
-nand0.setInput(source0, 0, 1);
-
-var inv = CompoundGate(Structure([source0], [sink0]));
-var toggle0 = Toggle();
-
-inv.setInput(toggle0, 0, 0);
-
-//source0.setData([1]);
-//source1.setData([1]);
+var variableOr0 = VariableOr();
+var source0 = Source(5);
+variableOr0.setInput(source0, 0, 0);
