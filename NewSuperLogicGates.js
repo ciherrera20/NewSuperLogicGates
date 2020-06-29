@@ -90,11 +90,13 @@ const zeroes = function(num) {
 		 */
 		EventDispatcher.addEventListener = function(eventName, callback) {
 			// Input validation
-			if (!callbacks[eventName]) throw new Error("The event \"" + eventName + "\" has not been defined");
+			//if (!callbacks[eventName]) throw new Error("The event \"" + eventName + "\" has not been defined");
 			if (!callback) throw new Error("A callback function must be provided");
 			
 			// Add callback
-			callbacks[eventName].push(callback);
+			if (callbacks[eventName]) {
+				callbacks[eventName].push(callback);
+			}
 		}
 		
 		/**
@@ -105,7 +107,7 @@ const zeroes = function(num) {
 		 */
 		EventDispatcher.removeEventListener = function(eventName, callback) {
 			// Input validation
-			if (!callbacks[eventName]) throw new Error("The event \"" + eventName + "\" has not been defined");
+			//if (!callbacks[eventName]) throw new Error("The event \"" + eventName + "\" has not been defined");
 			if (!callback) throw new Error("A callback function must be provided");
 			let callbackIndex = callbacks[eventName].indexOf(callback);
 			//if (callbackIndex === -1) throw new Error("The given callback is not registered with the event \"" + eventName + "\"");
@@ -118,6 +120,10 @@ const zeroes = function(num) {
 		
 		EventDispatcher.getEventListeners = function(eventName) {
 			return callbacks[eventName];
+		}
+		
+		EventDispatcher.getEventNames = function() {
+			return eventNames.slice();
 		}
 		
 		// Freeze and return object
@@ -201,7 +207,7 @@ const zeroes = function(num) {
 		if (inputIndex >= inputTo.numInputs) throw new Error("The input index must not be greater than or equal to the number of inputs the given gate has");
 		const inputSize = inputTo.getInputSize(inputIndex);
 		const outputSize = outputFrom.getOutputSize(outputIndex);
-		if (inputSize !== outputSize && inputSize !== Infinity && outputSize !== Infinity) throw new Error("Input size must match output size");
+		if (inputSize !== outputSize && inputSize !== Infinity) throw new Error("Input size must match output size");
 		
 		// Create object
 		const connection = Object.create(ConnectionProto);
@@ -211,6 +217,7 @@ const zeroes = function(num) {
 		connection.outputIndex = outputIndex;
 		connection.inputTo = inputTo;
 		connection.inputIndex = inputIndex;
+		connection.size = inputSize;
 		
 		// Freeze and return object
 		return Object.freeze(connection);
@@ -331,6 +338,8 @@ const traceOutputs = function(gate, callback, depth, history) {
 	 * @return				A gate object
 	 */
 	var Gate = function(inputSizes, outputSizes, constructor, state) {
+		console.blog(state);
+		
 		// Input validation
 		inputSizes.forEach(function(inputSize){
 			if (inputSize <= 0) throw new Error("An input's size cannot be less than or equal to 0");
@@ -341,7 +350,7 @@ const traceOutputs = function(gate, callback, depth, history) {
 		
 		// Create object
 		const gate = Object.create(GateProto);
-		Object.assign(gate, EventDispatcher(["inputset", "outputset", "inputremoved", "outputremoved", "calculation"]));
+		Object.assign(gate, EventDispatcher(["inputset", "outputset", "inputremoved", "outputremoved", "calculation", "removed", "replaced"]));
 		
 		// Internal object state
 		const numInputs = inputSizes.length; // Number of inputs
@@ -354,6 +363,7 @@ const traceOutputs = function(gate, callback, depth, history) {
 		let previousOutputs = []; // Array of previously calculated output data
 		let structureMap;
 		let updateRequired = true;
+		let replacedBy;
 		
 		// Load initial data into input and output arrays
 		if (!state) {
@@ -517,7 +527,7 @@ const traceOutputs = function(gate, callback, depth, history) {
 			const connection = inputsFrom[inputIndex];
 			if (!connection) return false;
 			
-			inputsFrom[inputIndex] = undefined;
+			delete inputsFrom[inputIndex];
 			
 			const e = Object.create(null);
 			e.parent = this;
@@ -567,6 +577,74 @@ const traceOutputs = function(gate, callback, depth, history) {
 			
 			// The removal was succesful!
 			return true;
+		}
+		
+		/**
+		 * Remove a gate from a structure by severing all its input and output connections
+		 */
+		gate.remove = function() {
+			inputsFrom.forEach(function(connection) {
+				connection.sever();
+			});
+			outputsTo.forEach(function(output) {
+				output.forEach(function(connection) {
+					connection.sever();
+				});
+			});
+			
+			const e = Object.create(null);
+			e.parent = this;
+			this.dispatchEvent(GEvent("removed", e));
+			
+			let that = this;
+			this.getEventNames().forEach(function(name) {
+				that.getEventListeners(name).forEach(function(callback) {
+					that.removeEventListener(name, callback);
+				});
+			});
+		}
+		
+		/**
+		 * Replace a gate in a structure with another, given gate
+		 */
+		gate.replace = function(replacement) {
+			inputsFrom.forEach(function(connection, i) {
+				connection.sever();
+				const replacementSize = replacement.getInputSize(i);
+				if (replacementSize === connection.size || replacementSize === Infinity) {
+					replacement.setInput(connection.outputFrom, connection.outputIndex, i);
+				}
+			});
+			outputsTo.forEach(function(output, i) {
+				output.forEach(function(connection) {
+					connection.sever();
+					if (replacement.getOutputSize(i) === connection.size) {
+						connection.inputTo.setInput(replacement, i, connection.inputIndex);
+					}
+				});
+			});
+						
+			replacedBy = replacement;
+			
+			const e = Object.create(null);
+			e.parent = this;
+			e.replacement = replacement;
+			this.dispatchEvent(GEvent("replaced", e));
+			
+			let that = this;
+			this.getEventNames().forEach(function(name) {
+				that.getEventListeners(name).forEach(function(callback) {
+					that.removeEventListener(name, callback);
+					replacement.addEventListener(name, callback);
+				});
+			});
+		}
+		
+		/**
+		 * Get the gate that this gate was replaced by
+		 */
+		gate.replacedBy = function() {
+			return replacedBy;
 		}
 		
 		/**
@@ -631,6 +709,7 @@ const traceOutputs = function(gate, callback, depth, history) {
 			result.connectionMap = new Map(); // Map of gates connected to outputs that have changed to the connections pointing to them
 			
 			// Add output connections that changed
+			let that = this;
 			outputs.forEach(function(outputData, i) {
 				outputData.some(function(datum, j) {
 					if (datum !== previousOutputs[i][j]) {
@@ -673,21 +752,36 @@ const traceOutputs = function(gate, callback, depth, history) {
 		
 		gate.toObj = function(argumentProvider) {
 			const obj = Object.create(null);
-			obj.name = GateRegistry.lookupConstructor(constructor);
-			obj.arguments = argumentProvider();
-			obj.uid = this.uid;
-			obj.inputs = inputs;
-			obj.outputs = outputs;
-			obj.inputsFrom = [];
+			
+			obj[SaveRegistry.lookupName("name")] = GateRegistry.lookupConstructor(constructor);
+			obj[SaveRegistry.lookupName("args")] = argumentProvider();
+			obj[SaveRegistry.lookupName("uid")] = this.uid;
+			obj[SaveRegistry.lookupName("inputs")] = inputs;
+			obj[SaveRegistry.lookupName("outputs")] = outputs;
+			obj[SaveRegistry.lookupName("inputsFrom")] = [];
+			
 			inputsFrom.forEach(function(connection, i) {
 				const inputFrom = Object.create(null);
-				inputFrom.outputFrom = connection.outputFrom.uid;
-				inputFrom.outputIndex = connection.outputIndex;
-				inputFrom.inputIndex = i;
-				obj.inputsFrom.push(inputFrom);
+				inputFrom[SaveRegistry.lookupName("outputFrom")] = connection.outputFrom.uid;
+				inputFrom[SaveRegistry.lookupName("outputIndex")] = connection.outputIndex;
+				inputFrom[SaveRegistry.lookupName("inputIndex")] = i;
+				obj[SaveRegistry.lookupName("inputsFrom")].push(inputFrom);
 			});
 			
 			return Object.freeze(obj);
+		}
+		
+		// Debugging getters
+		gate.blogInputs = function() {
+			console.blog("Inputs", this.uid, ...inputs);
+		}
+		
+		gate.blogOutputs = function() {
+			console.blog("Outputs", this.uid, ...outputs);
+		}
+		
+		gate.getStructureMap = function() {
+			return structureMap;
 		}
 		
 		// Freeze and return object
@@ -765,14 +859,14 @@ const traceOutputs = function(gate, callback, depth, history) {
 		 * @return				The difference between their layers
 		 */
 		const compareGateLayer = function(firstGate, secondGate) {
-			return structureMap.layerMap.get(secondGate) - structureMap.layerMap.get(firstGate);
+			return structureMap.layerMap.get(firstGate) - structureMap.layerMap.get(secondGate);
 		}
 		
-		console.blog("Sorting gate array");
+		console.blog("Layer map:", structureMap.layerMap);
+		
 		structureMap.gateArray.sort(compareGateLayer);
 		console.blog("Gate array:", structureMap.gateArray);
 		
-		console.blog("Constructing index map");
 		structureMap.gateArray.forEach(function(gate, i) {
 			structureMap.indexMap.set(gate, i);
 		});
@@ -784,7 +878,8 @@ const traceOutputs = function(gate, callback, depth, history) {
 	
 	Gate.propagate = function(sources, structureMap) {
 		let maps = []; // Temporary array to store the resulting connection maps from calculating the source gates
-		let sortedGates = []; // An array of gates sorted by layer, from highest to smallest
+		let sortedGates = Object.create(null); // An array of gates sorted by layer, from highest to smallest
+		let sortedUids = Object.create(null);
 		let visited = new WeakMap(); // A weak map of visited gates
 		
 		console.bgroup("Propagation started");
@@ -792,19 +887,31 @@ const traceOutputs = function(gate, callback, depth, history) {
 		
 		// Add the result of calculating the source gates to sortedGates and maps
 		sources.forEach(function(source) {
+			console.bgroup("Gate", source.uid, source);
+			source.blogInputs();
+			source.blogOutputs();
 			let result = source.calculate();
-			console.blog("Calculate ", source, result);
+			if (blog) {
+				let affectedUids = [];
+				result.forEach(function(affectedOutput) {
+					affectedUids.push(affectedOutput.uid);
+				});
+				console.log("Calculate", affectedUids);
+			}
+			source.blogOutputs();
+			console.bgroupEnd();
 			maps.push(result.connectionMap);
 		});
 		
 		// Combine connection maps and add output gates to sortedGates array
 		let connectionMap = combineMaps(maps);
 		for (let gate of connectionMap.keys()) {
-			sortedGates[structureMap.indexMap.get(gate)] = gate;
+			const index = structureMap.indexMap.get(gate);
+			sortedGates[index] = gate;
+			sortedUids[index] = gate.uid;
 		}
 		
-		console.blog("Connection map ", connectionMap);
-		console.blog("Sorted gates ", sortedGates);
+		console.blog("Sorted gates ", sortedUids);
 		console.bgroupEnd();
 		console.bgroup("Calculating affected gates");
 		
@@ -812,43 +919,52 @@ const traceOutputs = function(gate, callback, depth, history) {
 		let length = -1; // Number of elements iterable with forEach in sortedGates
 		while (length !== 0) {
 			length = 0;
-			sortedGates.forEach(function(gate, i) {
+			Object.keys(sortedGates).forEach(function(key) {
 				length++;
-				//let gate = sortedGates.pop(); // Get gate at the lowest layer
-				delete sortedGates[i]
-				console.bgroup("Gate ", gate);
 				
+				const gate = sortedGates[key]; // Get gate at the lowest layer
+				delete sortedGates[key];
+				delete sortedUids[key];
+				console.bgroup("Gate ", gate.uid, gate);
+				
+				gate.blogInputs();
 				console.bgroup("Loading inputs");
 				// Loop through all connections connecting to it
 				connectionMap.get(gate).forEach(function(connection) {
 					// Load the inputs represented by those connections
-					console.blog("Input ", connection.inputIndex, gate);
+					console.blog("Input", connection.inputIndex, gate.uid, "From", connection.outputFrom.uid);
 					gate.loadInput(connection);
 				});
 				console.bgroupEnd();
+				gate.blogInputs();
 				
+				gate.blogOutputs();
 				// If the gate has not yet been visited, call its calculate function and add the results to sortedGates and connectionMap
 				if (!visited.has(gate)) {
+					console.bgroup("Calculating");
 					let result = gate.calculate(); // Store result of the calculation
-					console.blog("Calculate ", gate, result);
+					let affectedUids = [];
 					
 					// Add all affected gates to sortedGates
 					result.forEach(function(outputTo) {
-						sortedGates[structureMap.indexMap.get(outputTo)] = outputTo;
+						const index = structureMap.indexMap.get(outputTo);
+						affectedUids.push(outputTo.uid);
+						sortedGates[index] = outputTo;
+						sortedUids[index] = outputTo.uid;
 					});
+					console.bgroupEnd();
+					console.blog("Affected gates", affectedUids);
 					
 					// Combine current connection map and the connection map from the result
 					connectionMap = combineMaps([connectionMap, result.connectionMap]);
 					
 					// Keep track of which gates have been visited to prevent recursion
 					visited.set(gate, true);
-					
-					console.blog("Connection map ", connectionMap);
-					console.blog("Sorted gates ", sortedGates);
 				} else {
-					console.blog("Already visited ", gate);
+					console.blog("Already visited ", gate.uid);
 				}
-				
+				gate.blogOutputs();
+				console.blog("Sorted gates ", sortedUids);
 				console.bgroupEnd();
 			});
 			console.blog("Sorted gates length ", length);
@@ -877,18 +993,23 @@ const traceOutputs = function(gate, callback, depth, history) {
 	 * @return		The arry of gates
 	 */
 	Gate.gatesFromObj = function(obj) {
+		const uid = SaveRegistry.lookupName("uid");
+		const inputsFrom = SaveRegistry.lookupName("inputsFrom");
+		const outputFrom = SaveRegistry.lookupName("outputFrom");
+		const outputIndex = SaveRegistry.lookupName("outputIndex");
+		const inputIndex = SaveRegistry.lookupName("inputIndex");
+		
 		const gateArray = [];
 		const idMap = Object.create(null);
 		obj.forEach(function(gateObj) {
-			const constructor = GateRegistry.lookupName(gateObj.name);
 			const gate = Gate.fromObj(gateObj);
 			gateArray.push(gate);
-			idMap[gateObj.uid] = gate;
+			idMap[gateObj[uid]] = gate;
 		});
 		obj.forEach(function(gateObj) {
-			const gate = idMap[gateObj.uid];
-			gateObj.inputsFrom.forEach(function(inputFrom) {
-				gate.setInput(idMap[inputFrom.outputFrom], inputFrom.outputIndex, inputFrom.inputIndex);
+			const gate = idMap[gateObj[uid]];
+			gateObj[inputsFrom].forEach(function(inputFrom) {
+				gate.setInput(idMap[inputFrom[outputFrom]], inputFrom[outputIndex], inputFrom[inputIndex]);
 			});
 		});
 		
@@ -904,16 +1025,21 @@ const traceOutputs = function(gate, callback, depth, history) {
 	 * @return		The gate
 	 */
 	Gate.fromObj = function(obj) {
-		const constructor = GateRegistry.lookupName(obj.name);
+		const name = SaveRegistry.lookupName("name");
+		const inputs = SaveRegistry.lookupName("inputs");
+		const outputs = SaveRegistry.lookupName("outputs");
+		const args = SaveRegistry.lookupName("args");
+		
+		const constructor = GateRegistry.lookupName(obj[name]);
 		
 		if (constructor.fromObj) {
 			return constructor.fromObj(obj);
 		} else {		
 			const state = Object.create(null);
-			state.inputs = obj.inputs;
-			state.outputs = obj.outputs;
+			state.inputs = obj[inputs];
+			state.outputs = obj[outputs];
 			
-			return constructor(...obj.arguments, state);
+			return constructor(...obj[args], state);
 		}
 	}
 	
@@ -925,6 +1051,47 @@ const traceOutputs = function(gate, callback, depth, history) {
 	
 	// Freeze prototype
 	Object.freeze(GateProto);
+}
+
+// SaveRegistry scope
+{
+	const abrvMap = Object.create(null);
+	const nameMap = Object.create(null);
+	
+	var SaveRegistry = Object.create(null);
+	
+	SaveRegistry.add = function(name, abrv) {
+		nameMap[name] = abrv;
+		abrvMap[abrv] = name;
+	}
+	
+	SaveRegistry.lookupName = function(name) {
+		let abrv = nameMap[name]
+		return abrv || name;
+	}
+	
+	SaveRegistry.lookupAbrv = function(abrv) {
+		return abrvMap[abrv];
+	}
+	
+	SaveRegistry.add("name", "n");
+	SaveRegistry.add("args", "a");
+	SaveRegistry.add("uid", "u");
+	SaveRegistry.add("inputs", "i");
+	SaveRegistry.add("outputs", "o");
+	SaveRegistry.add("inputsFrom", "if");
+	SaveRegistry.add("outputFrom", "of");
+	SaveRegistry.add("outputIndex", "oi");
+	SaveRegistry.add("inputIndex", "ii");
+	SaveRegistry.add("sources", "so");
+	SaveRegistry.add("sinks", "si");
+	SaveRegistry.add("gates", "g");
+	SaveRegistry.add("structure", "st");
+	SaveRegistry.add("inputSizes", "is");
+	SaveRegistry.add("outputSizes", "os");
+	SaveRegistry.add("calculatorBody", "cb");
+	
+	Object.freeze(SaveRegistry);
 }
 
 // GateRegistry scope
@@ -940,8 +1107,8 @@ const traceOutputs = function(gate, callback, depth, history) {
 	 * Add a constructor and name pair
 	 */
 	GateRegistry.add = function(constructor, name) {
-		nameMap[name] = constructor;
 		constructorMap.set(constructor, name);
+		nameMap[name] = constructor;
 	}
 	
 	/**
@@ -1193,6 +1360,14 @@ const traceOutputs = function(gate, callback, depth, history) {
 		this.sinks.push(size);
 	}
 	
+	StructureProto.getSource = function(sourceIndex) {
+		return this.sources[sourceIndex];
+	}
+	
+	StructureProto.getSink = function(sinkIndex) {
+		return this.sinks[sinkIndex];
+	}
+	
 	/**
 	 * Remove a source
 	 *
@@ -1368,7 +1543,11 @@ const traceOutputs = function(gate, callback, depth, history) {
 			
 			// Add the copied sinks into the new sinks array
 			sinks.forEach(function(sink) {
-				sinksCopy.push(copyMap.get(sink));
+				let sinkCopy = copyMap.get(sink);
+				if (!sinkCopy) {
+					sinkCopy = sink.getCopy();
+				}
+				sinksCopy.push(sinkCopy);
 			});
 			
 			// Return the newly constructed structure copy
@@ -1378,16 +1557,20 @@ const traceOutputs = function(gate, callback, depth, history) {
 		structure.toObj = function() {
 			this.update(updateRequired);
 			
+			const sourcesAbrv = SaveRegistry.lookupName("sources");
+			const sinksAbrv = SaveRegistry.lookupName("sinks");
+			const gates = SaveRegistry.lookupName("gates");
+			
 			const obj = Object.create(null);
-			obj.sources = [];
+			obj[sourcesAbrv] = [];
 			sources.forEach(function(source) {
-				obj.sources.push(source.uid);
+				obj[sourcesAbrv].push(source.uid);
 			});
-			obj.sinks = [];
+			obj[sinksAbrv] = [];
 			sinks.forEach(function(sink) {
-				obj.sinks.push(sink.uid);
+				obj[sinksAbrv].push(sink.uid);
 			});
-			obj.gates = Gate.gatesToObj(structureMap.gateArray);
+			obj[gates] = Gate.gatesToObj(structureMap.gateArray);
 			
 			return Object.freeze(obj);
 		}
@@ -1398,12 +1581,14 @@ const traceOutputs = function(gate, callback, depth, history) {
 	
 	Structure.fromObj = function(obj) {
 		const gateArray = Gate.gatesFromObj(obj.gates);
+		
 		const sources = [];
-		obj.sources.forEach(function(sourceId) {
+		obj[SaveRegistry.lookupName("sources")].forEach(function(sourceId) {
 			sources.push(gateArray.idMap[sourceId]);
 		});
+		
 		const sinks = [];
-		obj.sinks.forEach(function(sinkId) {
+		obj[SaveRegistry.lookupName("sinks")].forEach(function(sinkId) {
 			sinks.push(gateArray.idMap[sinkId]);
 		});
 		
@@ -1422,8 +1607,11 @@ const traceOutputs = function(gate, callback, depth, history) {
 
 // CompoundGate scope
 {
-	var CompoundGate = function(structure, state) {
+	var CompoundGate = function(name, structure, outOfDate, state) {
 		const compoundGate = Object.create(Gate(structure.generateInputSizes(), structure.generateOutputSizes(), CompoundGate, state));
+		outOfDate = outOfDate || false;
+		
+		compoundGate.defineEvents(["outofdate"]);
 		
 		compoundGate.setCalculator(function(data) {
 			// Load this gate's inputs into the structure's sources
@@ -1445,16 +1633,37 @@ const traceOutputs = function(gate, callback, depth, history) {
 		});
 		
 		compoundGate.setArgumentProvider(function() {
-			return [structure.getCopy()];
+			return [name, structure.getCopy(), outOfDate];
 		}, function() {
-			return [structure.toObj()];
+			return [name, structure.toObj(), outOfDate];
+		});
+		
+		compoundGate.flagOutOfDate = function() {
+			outOfDate = true;
+			
+			const e = Object.create(null);
+			e.parent = this;
+			this.dispatchEvent(GEvent("outofdate", e));
+		}
+		
+		compoundGate.isOutOfDate = function() {
+			return outOfDate;
+		}
+		
+		Object.defineProperty(compoundGate, "replace", {
+			enumerable: true,
+			value() {
+				const replacement = GateRegistry.lookupName(name)();
+				Object.getPrototypeOf(this).replace(replacement);
+				return replacement;	
+			}
 		});
 		
 		return Object.freeze(compoundGate);
 	}
 	
 	CompoundGate.fromObj = function(obj) {
-		const structure = Structure.fromObj(obj.arguments[0]);
+		const structure = Structure.fromObj(obj[SaveRegistry.lookupName("args")][0]);
 		const state = Object.create(null);
 		state.inputs = obj.inputs;
 		state.outputs = obj.outputs;
@@ -1467,10 +1676,9 @@ const traceOutputs = function(gate, callback, depth, history) {
 
 // GateFactory scope
 {
-	var GateFactory = function(inputSizes, outputSizes) {
+	var GateFactory = function(name, inputSizes, outputSizes, structure) {
 		// Create structure based on initially provided input and output sizes
-		let structure;
-		{
+		if (!structure) {
 			const sources = [];
 			if (inputSizes) {
 				inputSizes.forEach(function(size) {
@@ -1488,9 +1696,20 @@ const traceOutputs = function(gate, callback, depth, history) {
 			structure = Structure(sources, sinks);
 		}
 		
+		const gates = [];
+		
 		// Factory function creates and returns a CompoundGate object using a copy of the structure
 		const gateFactory = function() {
-			return CompoundGate(structure.getCopy(), gateFactory);
+			const gate = CompoundGate(name, structure.getCopy());
+			gates.push(gate);
+			
+			return gate;
+		}
+
+		const flagOutOfDate = function() {
+			while (gates.length > 0) {
+				gates.pop().flagOutOfDate();
+			}
 		}
 
 		gateFactory.update = function(required) {
@@ -1498,47 +1717,179 @@ const traceOutputs = function(gate, callback, depth, history) {
 		}
 
 		gateFactory.sendInputTo = function(inputTo, inputIndex, sourceIndex) {
+			flagOutOfDate();
 			structure.sendInputTo(inputTo, inputIndex, sourceIndex);
 		}
 		
 		gateFactory.removeInputTo = function(inputTo, inputIndex) {
+			flagOutOfDate();
 			structure.removeInputTo(inputTo, inputIndex);
 		}
 		
 		gateFactory.takeOutputFrom = function(outputFrom, outputIndex, sinkIndex) {
+			flagOutOfDate();
 			structure.takeOutputFrom(outputFrom, outputIndex, sinkIndex);
 		}
 		
 		gateFactory.removeOutputFrom = function(sinkIndex) {
+			flagOutOfDate();
 			structure.removeOutputFrom(sinkIndex);
 		}
 		
 		gateFactory.addSource = function(size) {
+			flagOutOfDate();
 			structure.addSource(size);
 		}
 		
 		gateFactory.addSink = function(size) {
+			flagOutOfDate();
 			structure.addSink(size);
 		}
 		
 		gateFactory.removeSource = function(sourceIndex) {
+			flagOutOfDate();
 			structure.removeSource(sourceIndex);
 		}
 		
 		gateFactory.removeSink = function(sinkIndex) {
+			flagOutOfDate();
 			structure.removeSink(sinkIndex);
 		}
 		
 		gateFactory.moveSource = function(sourceIndex, newIndex) {
+			flagOutOfDate();
 			structure.moveSource(sourceIndex, newIndex);
 		}
 		
 		gateFactory.moveSink = function(sinkIndex, newIndex) {
+			flagOutOfDate();
 			structure.moveSink(sinkIndex, newIndex);
 		}
 		
+		gateFactory.toObj = function() {
+			const obj = Object.create(null);
+			obj[SaveRegistry.lookupName("name")] = name;
+			obj[SaveRegistry.lookupName("structure")] = structure.toObj();
+			return Object.freeze(obj);
+		}
+		
+		GateRegistry.add(gateFactory, name);
+		
 		// Return factory function
 		return gateFactory;
+	}
+	
+	GateFactory.fromObj = function(obj) {
+		return GateFactory(obj[SaveRegistry.lookupName("name")], undefined, undefined, Structure.fromObj(obj[SaveRegistry.lookupName("structure")]));
+	}
+}
+
+// AtomicGateFactory scope
+{
+	var AtomicGateFactory = function(name, inputSizes, outputSizes, calculatorBody) {
+		inputSizes.forEach(function(inputSize, i) {
+			if (inputSize === null) {
+				inputSizes[i] = Infinity;
+			}
+		});
+		
+		outputSizes.forEach(function(outputSize, i) {
+			if (outputSize === null) {
+				outputSizes[i] = Infinity;
+			}
+		});
+		
+		const gates = [];
+		let calculator = Function("inputs", "inputSizes", "outputSizes", calculatorBody);
+		
+		const validCalculator = function(calculator) {
+			let inputs = [];
+			inputSizes.forEach(function(size) {
+				if (size === Infinity) {
+					inputs.push([]);
+				} else {
+					inputs.push(zeroes(size));
+				}
+			});
+			let outputs = calculator(inputs, inputSizes.slice(), outputSizes.slice());
+			return outputs.every(function(output, i) {
+				if (outputSizes[i] === Infinity) {
+					return true;
+				} else {
+					return output.length === outputSizes[i]
+				}
+			});
+		}
+		
+		if (!validCalculator(calculator)) {
+			throw new Error("The given calculator's results do not match its output sizes");
+		}
+		
+		/**
+		 * Creates an atomic gate instance, which is just a regular gate with a calculator function provided by the user
+		 */
+		const atomicGateFactory = function(state) {
+			const atomicGate = Object.create(Gate(inputSizes, outputSizes, atomicGateFactory, state));
+			
+			gates.push(atomicGate);
+			
+			atomicGate.setCalculator(function(data) {
+				return calculator(data.inputs, data.inputSizes.slice(), data.outputSizes.slice());
+			});
+			atomicGate.setArgumentProvider(function(){return []});
+			
+			return Object.freeze(atomicGate);
+		}
+		
+		const replaceGates = function() {
+			gates.forEach(function(gate) {
+				gate.replace(atomicGateFactory());
+			});
+		}
+		
+		/**
+		 * Set the calculator body for all gates created with this gate factory
+		 */
+		atomicGateFactory.setCalculatorBody = function(newCalculatorBody) {
+			const newCalculator = Function("inputs", "inputSizes", "outputSizes", newCalculatorBody);
+			if (validCalculator(newCalculator)) {
+				calculatorBody = newCalculatorBody;
+				calculator = newCalculator;
+			} else {
+				throw new Error("The given calculator's results do not match its output sizes");
+			}
+		}
+		
+		atomicGateFactory.toObj = function() {
+			const obj = Object.create(null);
+			obj[SaveRegistry.lookupName("name")] = name;
+			obj[SaveRegistry.lookupName("inputSizes")] = inputSizes;
+			obj[SaveRegistry.lookupName("outputSizes")] = outputSizes;
+			obj[SaveRegistry.lookupName("calculatorBody")] = calculatorBody;
+			return Object.freeze(obj);
+		}
+		
+		atomicGateFactory.setInputSizes = function(newInputSizes) {
+			inputSizes = newInputSizes;
+			replaceGates();
+		}
+		
+		atomicGateFactory.setOutputSizes = function(newOutputSizes) {
+			outputSizes = newOutputSizes;
+			replaceGates();
+		}
+		
+		GateRegistry.add(atomicGateFactory, name);
+		
+		return Object.freeze(atomicGateFactory);
+	}
+	
+	AtomicGateFactory.fromObj = function(obj) {
+		const name = obj[SaveRegistry.lookupName("name")];
+		const inputSizes = obj[SaveRegistry.lookupName("inputSizes")];
+		const outputSizes = obj[SaveRegistry.lookupName("outputSizes")];
+		const calculatorBody = obj[SaveRegistry.lookupName("calculatorBody")];
+		return AtomicGateFactory(name, inputSizes, outputSizes, calculatorBody);
 	}
 }
 
@@ -1748,7 +2099,7 @@ const traceOutputs = function(gate, callback, depth, history) {
 	GateRegistry.add(VariableInv, "VariableInv");
 }
 
-// Inv scope
+/*// Inv scope
 // {
 	const nand0 = Nand();
 	var Inv = GateFactory([1], [1]);
@@ -1779,4 +2130,4 @@ const traceOutputs = function(gate, callback, depth, history) {
 
 var variableOr0 = VariableOr();
 var source0 = Source(5);
-variableOr0.setInput(source0, 0, 0);
+variableOr0.setInput(source0, 0, 0);*/
