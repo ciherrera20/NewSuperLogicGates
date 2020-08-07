@@ -336,7 +336,17 @@ latch0.addEventListener("replaced", function(e) {
 	console.log(e.parent.uid, "was replaced by", e.replacement.uid);
 });
 
-var Test = AtomicGateFactory("Test", [Infinity], [Infinity], `return inputs`);
+/*blog = true;
+toggle0.toggle();
+toggle0.propagate();
+toggle1.toggle();
+toggle1.propagate();
+toggle0.toggle();
+toggle0.propagate();
+toggle1.toggle();
+toggle1.propagate();*/
+
+/*var Test = AtomicGateFactory("Test", [Infinity], [Infinity], `return inputs`);
 var test0 = Test();
 
 test0.addEventListener("replaced", function(e) {
@@ -350,17 +360,7 @@ Test.setCalculatorBody(`return [inputs[0], [1]]`);
 test0 = test0.replacedBy();
 test0.blogOutputs();
 test0.calculate();
-test0.blogOutputs();
-
-/*blog = true;
-toggle0.toggle();
-toggle0.propagate();
-toggle1.toggle();
-toggle1.propagate();
-toggle0.toggle();
-toggle0.propagate();
-toggle1.toggle();
-toggle1.propagate();*/
+test0.blogOutputs();*/
 
 /*var nand0 = Nand();
 var nand1 = Nand();

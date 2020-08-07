@@ -2,8 +2,8 @@
 <html>
 	<head>
 		<title>New Super Logic Gates</title>
-		<script src="./NewSuperLogicGates.js"></script>
-		<script src="./GateData.js"></script>
+		<script src="./NewSuperLogicGates2.js"></script>
+		<!--<script src="./GateData.js"></script>-->
 	</head>
 	<body>
 		<style>
@@ -11,5 +11,21 @@
 				background-color: black;
 			}
 		</style>
+		<!--<mega-button id="1"></mega-button>-->
+		<script>
+			/*var MegaButton = function() {
+				const megaButton = Object.create(HTMLElement.prototype);
+				
+				return megaButton;
+			}*/
+			
+			class MegaButton extends HTMLElement {
+				constructor() {
+					super();
+				}
+			}
+			customElements.define("mega-button", MegaButton);
+		</script>
+		<!--<mega-button id="2"></mega-button>-->
 	</body>
 </html>
